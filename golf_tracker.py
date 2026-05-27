@@ -17,6 +17,19 @@ def ask(prompt):
     return val
 
 
+def ask_int(prompt, default=None):
+    """Like ask(), but keeps prompting until a valid integer is entered.
+    If default is given, pressing Enter without typing returns that value."""
+    while True:
+        raw = ask(prompt)
+        if not raw and default is not None:
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            print("  Please enter a whole number.")
+
+
 def parse_date(raw):
     """
     Accept DD-MM-YYYY or YYYY-MM-DD with any of - / . or space as separator.
@@ -126,13 +139,17 @@ def add_round(conn):
         print("  Unrecognised date — try DD-MM-YYYY, e.g. 20-05-2026.")
 
     course = ask("Course name: ")
-    holes  = int(ask("Holes (9/18): "))
-    par    = int(ask("Course par: "))
+    while True:
+        holes = ask_int("Holes (9/18): ")
+        if holes in (9, 18):
+            break
+        print("  Please enter 9 or 18.")
+    par    = ask_int("Course par: ")
 
     print(f"\nEnter score for each of {holes} holes:")
     scores = []
     for h in range(1, holes + 1):
-        scores.append(int(ask(f"  Hole {h:>2}: ")))
+        scores.append(ask_int(f"  Hole {h:>2}: "))
 
     # Correction loop — show the full scorecard and let the user fix any hole
     # before the round is committed to the database.
@@ -148,9 +165,9 @@ def add_round(conn):
 
         if ask("\nWould you like to correct any scores before saving? (y/n): ").lower() != "y":
             break
-        hole_num = int(ask(f"Which hole (1-{holes})? "))
+        hole_num = ask_int(f"Which hole (1-{holes})? ")
         if 1 <= hole_num <= holes:
-            scores[hole_num - 1] = int(ask(f"New score for hole {hole_num}: "))
+            scores[hole_num - 1] = ask_int(f"New score for hole {hole_num}: ")
         else:
             print(f"  Hole must be between 1 and {holes}.")
 
@@ -239,7 +256,7 @@ def view_detail(conn):
     if not rows:
         return
     print("Type 'b' at any prompt to return to the menu.")
-    num = int(ask("\nRound # for hole detail: "))
+    num = ask_int("\nRound # for hole detail: ")
     if not 1 <= num <= len(rows):
         print("Invalid round number.")
         return
@@ -377,7 +394,7 @@ def manage_round(conn):
         return
 
     print("Type 'b' at any prompt to return to the menu.")
-    num = int(ask("\nRound # to edit or delete: "))
+    num = ask_int("\nRound # to edit or delete: ")
     if not 1 <= num <= len(rows):
         print("Invalid round number.")
         return
@@ -428,8 +445,7 @@ def _edit_round_details(conn, rid, date_, course, par):
     raw_date   = ask(f"Date   [{fmt_date(date_)}]: ")
     new_date   = parse_date(raw_date or date_) or date_
     new_course = ask(f"Course [{course}]: ") or course
-    raw_par    = ask(f"Par    [{par}]: ")
-    new_par    = int(raw_par) if raw_par else par
+    new_par    = ask_int(f"Par    [{par}]: ", default=par)
 
     conn.execute(
         "UPDATE rounds SET date=?, course=?, par=? WHERE id=?",
@@ -460,8 +476,8 @@ def _edit_hole_score(conn, rid, holes):
     for h, s in hs:
         print(f"  Hole {h:>2}: {s}")
 
-    hole_num  = int(ask(f"\nHole to edit (1-{holes}): "))
-    new_score = int(ask(f"New score for hole {hole_num}: "))
+    hole_num  = ask_int(f"\nHole to edit (1-{holes}): ")
+    new_score = ask_int(f"New score for hole {hole_num}: ")
 
     # Update just the one row where both round_id and hole match.
     # Using AND in the WHERE clause means both conditions must be true —
@@ -513,6 +529,53 @@ def _delete_round(conn, rid, date_, course):
     print(f"Round #{rid} deleted.")
 
 
+def search_by_course(conn):
+    """
+    Filter rounds by a partial, case-insensitive course name and show a
+    stats summary for the matched rounds.
+
+    LIKE with % wildcards matches any substring — '%royal%' matches
+    'Royal Melbourne', 'Royal Sydney', etc. LOWER() on both sides makes
+    the comparison case-insensitive without needing a COLLATE clause.
+    """
+    print("Type 'b' to return to the menu.\n")
+    query = ask("Search course name: ").strip()
+    if not query:
+        print("No search term entered.")
+        return
+
+    pattern = f"%{query.lower()}%"
+    rows = conn.execute(
+        """SELECT id, date, course, holes, total_score, par
+           FROM rounds
+           WHERE LOWER(course) LIKE ?
+           ORDER BY date ASC""",
+        (pattern,)
+    ).fetchall()
+
+    if not rows:
+        print(f"No rounds found matching '{query}'.")
+        return
+
+    print(f"\n{len(rows)} round(s) matching '{query}':\n")
+    print(f"{'#':>3}  {'Date':<12}  {'Course':<25}  Holes  Score  To Par")
+    print("-" * 66)
+    for i, r in enumerate(rows, 1):
+        print(f"{i:>3}  {fmt_date(r[1]):<12}  {r[2]:<25}  {r[3]:>5}  {r[4]:>5}  {rel_str(r[4], r[5]):>6}")
+
+    diffs  = [r[4] - r[5] for r in rows]
+    scores = [r[4] for r in rows]
+    avg_diff = sum(diffs) / len(diffs)
+    avg_diff_str = f"+{avg_diff:.1f}" if avg_diff > 0 else ("E" if avg_diff == 0 else f"{avg_diff:.1f}")
+    best  = min(rows, key=lambda r: r[4] - r[5])
+    worst = max(rows, key=lambda r: r[4] - r[5])
+
+    print(f"\n  Rounds played : {len(rows)}")
+    print(f"  Avg score     : {sum(scores)/len(scores):.1f}  ({avg_diff_str} avg to par)")
+    print(f"  Best round    : {best[4]} ({rel_str(best[4], best[5])})  —  {best[2]}, {fmt_date(best[1])}")
+    print(f"  Worst round   : {worst[4]} ({rel_str(worst[4], worst[5])})  —  {worst[2]}, {fmt_date(worst[1])}")
+
+
 MENU = """
 1. Add round
 2. View all rounds
@@ -520,7 +583,8 @@ MENU = """
 4. Stats
 5. Score trend (last 10 rounds)
 6. Edit or delete a round
-7. Quit
+7. Search by course
+8. Quit
 """
 
 
@@ -537,7 +601,8 @@ def main():
             elif c == "4": view_stats(conn)
             elif c == "5": view_trend(conn)
             elif c == "6": manage_round(conn)
-            elif c == "7": break
+            elif c == "7": search_by_course(conn)
+            elif c == "8": break
         except BackToMenu:
             print("\nReturning to menu.")
     conn.close()
